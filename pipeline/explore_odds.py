@@ -16,21 +16,22 @@ params = {
     "oddsFormat": "american"
 }
 
-prepared = requests.Request('GET', url,params=params).prepare()
-
-
 response = requests.get(url, params=params)
-
 data = response.json()
 
-game = data[0]
-print("Game:", game["away_team"], "at", game["home_team"])
-print("Commence time:", game["commence_time"])
-print("Bookmakers:", [b["title"] for b in game["bookmakers"]])
+for game in data:
+    print(f"\n{game['away_team']} at {game['home_team']}")
+    betmgm_found = False
+    for bookmaker in game["bookmakers"]:
+        if bookmaker["title"] == "BetMGM":
+            betmgm_found = True
+            outcomes = bookmaker["markets"][0]["outcomes"]
+            for outcome in outcomes:
+                print(f"{outcome['name']}: {outcome['point']}")
+    if not betmgm_found:
+        print(" No BetMGM line available - will score straight up")                
 
-for bookmaker in game["bookmakers"]:
-    if bookmaker["title"] == "BetMGM":
-        outcomes = bookmaker["markets"][0]["outcomes"]
-        for outcome in outcomes:
-            print(f"{outcome['name']}: {outcome['point']}")
-            
+
+
+
+
