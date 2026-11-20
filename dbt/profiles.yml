@@ -3,4 +3,7 @@ pickem:
   outputs:
     dev:
       type: duckdb
-      path: "md:pickem_spike"
+      path: "md:pickem_dev"
+    prod:
+      type: duckdb
+      path: "md:pickem_prod"
