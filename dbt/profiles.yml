@@ -1,0 +1,6 @@
+pickem:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "md:pickem_spike"

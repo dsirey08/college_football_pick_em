@@ -1,0 +1,5 @@
+name: pickem
+version: "1.0.0"
+profile: pickem
+model-paths: ["models"]
+
