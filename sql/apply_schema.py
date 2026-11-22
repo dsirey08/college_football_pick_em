@@ -6,7 +6,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-with open("sql/create_tables.sql") as f:
+if len(sys.argv) != 2:
+    sys.exit("Usage: python sql/apply_schema.py <path/to/file.sql>")
+
+with open(sys.argv[1]) as f:
     ddl = f.read()
 
 if not os.getenv("MOTHERDUCK_TOKEN"):
@@ -15,5 +18,5 @@ if not os.getenv("MOTHERDUCK_TOKEN"):
 con = duckdb.connect("md:pickem_dev")
 
 con.execute(ddl)
-print("Schema applied to pickem_dev.")
+print(f"Applied {sys.argv[1]} to pickem_dev.")
 con.close()
