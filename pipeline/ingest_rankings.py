@@ -1,54 +1,74 @@
-import os
-import requests
-from dotenv import load_dotenv
-import psycopg2
+"""Ingest ESPN's latest polls (CFP, AP, Coaches, FCS Coaches) into the rankings table.
 
-load_dotenv()
+Usage:
+  python pipeline/ingest_rankings.py              # latest polls -> pickem_dev
+  python pipeline/ingest_rankings.py --dry-run    # fetch and parse only
+  python pipeline/ingest_rankings.py --target prod
 
-conn = psycopg2.connect(os.getenv("DATABASE_URL"))
-cursor = conn.cursor()
+Stores ALL ranked teams (top 25 plus "others receiving votes" as rank 26+), not just
+the watchlist: land raw, filter in dbt. The CFP-else-AP rule also lives in dbt.
+Ranked teams not yet in teams are added (is_listed = FALSE).
+Idempotent: upsert on (week_id, team_id, poll_type); a re-issued poll updates rank.
+"""
+import argparse
+import time
 
-ESPN_RANKINGS_URL = "https://site.api.espn.com/apis/site/v2/sports/football/college-football/rankings"
+import db
+import espn
 
-response = requests.get(ESPN_RANKINGS_URL)
-data = response.json()
 
-ap_poll = None
-for ranking in data["rankings"]:
-    if ranking["name"] == "AP Top 25":
-        ap_poll = ranking
-        break
+def write(con, rows):
+    before = con.execute("SELECT count(*) FROM rankings").fetchone()[0]
+    con.execute("""
+        CREATE OR REPLACE TEMP TABLE stg_rankings (
+            week_id INTEGER, espn_team_id VARCHAR, poll_type VARCHAR, rank INTEGER)
+    """)
+    con.executemany(
+        "INSERT INTO stg_rankings VALUES (?, ?, ?, ?)",
+        [(r["week_id"], r["espn_team_id"], r["poll_type"], r["rank"]) for r in rows],
+    )
+    con.execute("""
+        INSERT INTO rankings (week_id, team_id, poll_type, rank)
+        SELECT s.week_id, t.team_id, s.poll_type, s.rank
+        FROM stg_rankings s
+        JOIN teams t ON t.espn_team_id = s.espn_team_id
+        ON CONFLICT (week_id, team_id, poll_type) DO UPDATE SET rank = excluded.rank
+    """)
+    after = con.execute("SELECT count(*) FROM rankings").fetchone()[0]
+    return before, after
 
-if ap_poll is None:
-    print("AP poll not found")
-else:
-    print(f"Found poll: {ap_poll['name']}")
-    print(f"Number of teams ranked: {len(ap_poll['ranks'])}")
 
-    for rank_entry in ap_poll["ranks"]:
-        team = rank_entry["team"]
-        rank = rank_entry["current"]
-        espn_team_id = team["id"]
-        team_name = team["location"]
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--target", default="dev", choices=["dev", "prod"])
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
 
-        cursor.execute("""
-            SELECT team_id
-            FROM teams
-            WHERE espn_team_id = %s
-            """, (espn_team_id,))
-        
-        result = cursor.fetchone()
+    data = espn.get_json(f"{espn.SITE_BASE}/rankings")
+    rows, teams, skipped = espn.parse_rankings(data)
+    summary = {}
+    for r in rows:
+        key = (r["poll_type"], r["week_id"])
+        summary[key] = summary.get(key, 0) + 1
+    for (poll, week), n in sorted(summary.items()):
+        print(f"  {poll:>4} week {week}: {n} teams")
+    if skipped:
+        print(f"Skipped polls: {skipped}")
+    if not rows:
+        raise SystemExit("No rankings parsed; ESPN response may have changed.")
 
-        if result is None:
-            print(f"Skipping # {rank} {team_name} - not in watchlist")
-        else:
-            team_id = result[0]
-            cursor.execute("""
-                INSERT INTO rankings (week_id, team_id, poll_type, rank)
-                VALUES (%s, %s, %s, %s)
-                """,  (1, team_id, 'AP', rank))
-            print(f"Inserted # {rank} {team_name}")
+    if args.dry_run:
+        print("Dry run: no database writes.")
+        return
 
-conn.commit()
-conn.close()
+    t0 = time.time()
+    con = db.connect(args.target)
+    new_teams = db.upsert_teams(con, teams)
+    before, after = write(con, rows)
+    con.close()
+    print(f"Teams: +{new_teams} new. Rankings: {before} -> {after} rows (+{after - before}). "
+          f"DB time {time.time() - t0:.1f}s")
 
+
+if __name__ == "__main__":
+    main()

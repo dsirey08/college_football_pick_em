@@ -10,8 +10,10 @@ Idempotent: teams upsert by espn_team_id (DO NOTHING), games upsert by espn_even
 (only kickoff_at is updated, because DuckDB can't update FK/indexed columns on referenced rows).
 """
 import argparse
+import time
 from datetime import datetime, timezone
 
+import db
 import espn
 
 
@@ -38,20 +40,7 @@ def fetch_week(week, conference_divisions, season_year):
 
 def write(con, games, teams):
     """Upsert teams then games. Returns (new_teams, games_before, games_after)."""
-    teams_before = con.execute("SELECT count(*) FROM teams").fetchone()[0]
-    # Stage rows in a local TEMP table (fast, no network per row), then send ONE bulk
-    # INSERT ... SELECT to MotherDuck. executemany straight into MotherDuck = 1 round trip per row.
-    con.execute("CREATE OR REPLACE TEMP TABLE stg_teams (team_name VARCHAR, division VARCHAR, espn_team_id VARCHAR)")
-    con.executemany(
-        "INSERT INTO stg_teams VALUES (?, ?, ?)",
-        [(t["team_name"], t["division"], espn_id) for espn_id, t in teams.items()],
-    )
-    con.execute("""
-        INSERT INTO teams (team_name, division, is_listed, espn_team_id)
-        SELECT team_name, division, FALSE, espn_team_id FROM stg_teams
-        ON CONFLICT (espn_team_id) DO NOTHING
-    """)
-    teams_after = con.execute("SELECT count(*) FROM teams").fetchone()[0]
+    new_teams = db.upsert_teams(con, teams)
 
     games_before = con.execute("SELECT count(*) FROM schedule").fetchone()[0]
     con.execute("""
@@ -72,7 +61,7 @@ def write(con, games, teams):
         ON CONFLICT (espn_event_id) DO UPDATE SET kickoff_at = excluded.kickoff_at
     """)
     games_after = con.execute("SELECT count(*) FROM schedule").fetchone()[0]
-    return teams_after - teams_before, games_before, games_after
+    return new_teams, games_before, games_after
 
 
 def main():
@@ -118,8 +107,6 @@ def main():
         print("Dry run: no database writes.")
         return
 
-    import db  # imported here so --dry-run works without MotherDuck set up
-    import time
     t0 = time.time()
     con = db.connect(args.target)
     new_teams, before, after = write(con, all_games, all_teams)
