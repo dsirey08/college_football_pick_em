@@ -162,3 +162,50 @@ def parse_events(scoreboard, league_week, conference_divisions, season_year=None
             "kickoff_at": kickoff if comp.get("timeValid", True) else None,
         })
     return games, teams, skipped
+
+
+# ---------------------------------------------------------------- rankings
+
+POLL_TYPES = {"cfp", "ap", "usa", "fcs"}  # CFP, AP, Coaches (FBS), FCS Coaches
+
+
+def parse_rankings(rankings_response):
+    """Turn ESPN's rankings response into (rows, teams, skipped).
+
+    rows: dicts with week_id, espn_team_id, poll_type, rank
+      - top 25 use ESPN's rank
+      - "others receiving votes" get rank 26+ by points (ties share a rank), so the
+        selection step can widen past the top 25
+    teams: espn_team_id -> {team_name, division} (division from the team's parent group)
+    Only regular-season polls (seasonType 2) for league weeks 1-15 are kept.
+    """
+    rows, teams, skipped = [], {}, []
+    for poll in rankings_response.get("rankings", []):
+        poll_type = poll.get("type")
+        if poll_type not in POLL_TYPES:
+            skipped.append((poll.get("name"), "poll type not tracked"))
+            continue
+        season_type = poll.get("season", {}).get("type", {}).get("type")
+        week = int(poll.get("occurrence", {}).get("number", 0))
+        if season_type != 2 or not 1 <= week <= 15:
+            skipped.append((poll.get("name"), f"not a regular-season week (type {season_type}, week {week})"))
+            continue
+
+        def add_team(team):
+            parent = (team.get("groups") or {}).get("parent") or {}
+            teams[team["id"]] = {
+                "team_name": team.get("location") or team.get("nickname"),
+                "division": parent.get("shortName") or "Other",
+            }
+
+        for entry in poll.get("ranks", []):
+            add_team(entry["team"])
+            rows.append({"week_id": week, "espn_team_id": entry["team"]["id"],
+                         "poll_type": poll_type, "rank": int(entry["current"])})
+        others = sorted(poll.get("others", []), key=lambda o: -o.get("points", 0))
+        for o in others:
+            higher = sum(1 for x in others if x.get("points", 0) > o.get("points", 0))
+            add_team(o["team"])
+            rows.append({"week_id": week, "espn_team_id": o["team"]["id"],
+                         "poll_type": poll_type, "rank": 26 + higher})
+    return rows, teams, skipped
